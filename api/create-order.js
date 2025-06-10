@@ -1,8 +1,17 @@
 export default async function handler(req, res) {
     // Handle preflight request (OPTIONS)
+
+    const origin = req.headers.origin;
+    const isAllowedOrigin = origin &&
+        (origin === 'https://minteventrentals.com' ||
+            origin === 'https://www.minteventrentals.com');
+
     if (req.method === 'OPTIONS') {
         res.setHeader('Access-Control-Allow-Credentials', 'true');
-        res.setHeader('Access-Control-Allow-Origin', 'https://minteventrentals.com');
+        // res.setHeader('Access-Control-Allow-Origin', 'https://minteventrentals.com');
+        if (isAllowedOrigin) {
+            res.setHeader('Access-Control-Allow-Origin', origin);
+        }
         res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
         return res.status(200).end();
@@ -10,7 +19,10 @@ export default async function handler(req, res) {
 
     // Allow CORS for actual requests
     res.setHeader('Access-Control-Allow-Credentials', 'true');
-    res.setHeader('Access-Control-Allow-Origin', 'https://minteventrentals.com');
+    // res.setHeader('Access-Control-Allow-Origin', 'https://minteventrentals.com');
+    if (isAllowedOrigin) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+    }
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
