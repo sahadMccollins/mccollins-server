@@ -1,52 +1,93 @@
-export default async function handler(req, res) {
-    // Handle preflight request (OPTIONS)
+import { createShopifyOrder } from '../lib/shopify.js';
+import { validateAndBuildOrder } from '../lib/order-validation.js';
+import { saveSubmissionReceived, saveSubmissionStatus } from '../lib/quote-db.js';
 
-    const origin = req.headers.origin;
-    const isAllowedOrigin = origin &&
-        (origin === 'https://minteventrentals.com' ||
-            origin === 'https://www.minteventrentals.com');
+const ALLOWED_ORIGINS = new Set([
+    'https://minteventrentals.com',
+    'https://www.minteventrentals.com',
+]);
+
+function applyCors(req, res) {
+    const origin = req.headers?.origin;
+    res.setHeader('Vary', 'Origin');
+    if (origin && ALLOWED_ORIGINS.has(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+}
+
+export default async function handler(req, res) {
+    applyCors(req, res);
 
     if (req.method === 'OPTIONS') {
-        res.setHeader('Access-Control-Allow-Credentials', 'true');
-        // res.setHeader('Access-Control-Allow-Origin', 'https://minteventrentals.com');
-        if (isAllowedOrigin) {
-            res.setHeader('Access-Control-Allow-Origin', origin);
-        }
-        res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
         return res.status(200).end();
     }
 
-    // Allow CORS for actual requests
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-    // res.setHeader('Access-Control-Allow-Origin', 'https://minteventrentals.com');
-    if (isAllowedOrigin) {
-        res.setHeader('Access-Control-Allow-Origin', origin);
-    }
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-    // Only allow POST method
     if (req.method !== 'POST') {
-        return res.status(405).json({ message: 'Only POST requests allowed' });
+        return res.status(405).json({ ok: false, error: 'Only POST requests allowed' });
     }
 
-    const orderData = req.body;
+    // Save raw submission first before validation or calling Shopify
+    const submissionId = await saveSubmissionReceived(req.body);
 
     try {
-        const response = await fetch('https://qhvm3e-ny.myshopify.com/admin/api/2024-10/orders.json', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN,
-            },
-            body: JSON.stringify({ order: orderData }),
+        const validation = validateAndBuildOrder(req.body);
+        if (!validation.ok) {
+            await saveSubmissionStatus(submissionId, {
+                status: 'invalid',
+                httpStatus: 400,
+                errors: validation.errors,
+                message: validation.errors.join('; '),
+            });
+            return res.status(400).json({
+                ok: false,
+                error: 'Invalid order submission',
+                details: validation.errors,
+            });
+        }
+
+        const { response, data, requestId } = await createShopifyOrder(validation.order);
+
+        if (!response.ok || data?.errors || !data?.order?.id) {
+            await saveSubmissionStatus(submissionId, {
+                status: 'shopify_failed',
+                httpStatus: response.status,
+                requestId,
+                errors: data?.errors ?? data,
+                message: `Shopify HTTP ${response.status}`,
+            });
+            return res.status(502).json({
+                ok: false,
+                error: 'Unable to submit quote order right now. Please try again.',
+            });
+        }
+
+        await saveSubmissionStatus(submissionId, {
+            status: 'shopify_ok',
+            httpStatus: response.status,
+            requestId,
+            shopifyOrderId: data.order.id,
+            shopifyOrderName: data.order.name,
+            message: `Created order ${data.order.name || data.order.id}`,
         });
 
-        const data = await response.json();
-        console.log("data", data);
-        res.status(200).json(data);
+        return res.status(200).json({
+            ok: true,
+            order: {
+                id: data.order.id,
+                name: data.order.name,
+            },
+        });
     } catch (err) {
-        res.status(500).json({ message: 'Error creating order', error: err.message });
+        await saveSubmissionStatus(submissionId, {
+            status: 'server_error',
+            httpStatus: 500,
+            message: err?.message || 'Unexpected server error',
+        });
+        return res.status(500).json({
+            ok: false,
+            error: 'Internal server error',
+        });
     }
 }
